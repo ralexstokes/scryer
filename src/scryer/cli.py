@@ -79,9 +79,17 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser("status", help="Show issue status counts from SQLite"),
         with_defaults=False,
     )
+    run_once_parser = sub.add_parser("run-once", help="Run one poll/claim/execute cycle")
     add_common_args(
-        sub.add_parser("run-once", help="Run one poll/claim/execute cycle"),
+        run_once_parser,
         with_defaults=False,
+    )
+    run_once_parser.add_argument(
+        "--issue",
+        "--issue-id",
+        dest="issue_id",
+        type=int,
+        help="Process this GitHub issue number instead of the next pending issue",
     )
     add_common_args(
         sub.add_parser("daemon", help="Run the continuous daemon loop"),
@@ -137,11 +145,11 @@ def cmd_status(config_path: str, repo_root: Path) -> int:
             db.close()
 
 
-def cmd_run_once(config_path: str, repo_root: Path) -> int:
+def cmd_run_once(config_path: str, repo_root: Path, issue_id: int | None = None) -> int:
     db: Database | None = None
     try:
         db, daemon = build_service(config_path, repo_root)
-        daemon.run_once()
+        daemon.run_once(issue_id=issue_id)
         return 0
     finally:
         if db is not None:
@@ -286,7 +294,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             return cmd_status(args.config, repo_root)
         if args.command == "run-once":
-            return cmd_run_once(args.config, repo_root)
+            return cmd_run_once(args.config, repo_root, getattr(args, "issue_id", None))
         if args.command == "daemon":
             return cmd_daemon(args.config, repo_root)
         if args.command == "doctor":

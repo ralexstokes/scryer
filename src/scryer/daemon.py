@@ -117,27 +117,64 @@ class DaemonService:
             self._sleep_interruptible(sleep_seconds)
         self.log.info("daemon stopped")
 
-    def run_once(self) -> CycleResult:
+    def run_once(self, issue_id: int | None = None) -> CycleResult:
         polled = self.poller.poll_and_upsert()
         self.log.info("poll sync complete fetched=%s", polled)
         expired = self.db.requeue_expired_leases()
         if expired:
             self.log.info("requeued expired leases count=%s", expired)
 
-        if self._daily_limit_reached():
+        if issue_id is None and self._daily_limit_reached():
             self.log.warning("daily issue limit reached limit=%s", self.config.max_issues_per_day)
             return CycleResult(processed=False, status=None)
 
-        issue = self.db.claim_next_pending(
+        if issue_id is None:
+            issue = self.db.claim_next_pending(
+                worker_id=self.config.worker_id,
+                max_attempts=self.config.max_attempts,
+                lease_seconds=self.config.lease_seconds,
+            )
+            if issue is None:
+                self.log.info("no pending issues available")
+                return CycleResult(processed=False, status=None)
+        else:
+            issue = self._claim_target_issue(issue_id)
+            if issue is None:
+                self.log.info("requested issue is not pending id=%s", issue_id)
+                return CycleResult(processed=False, status=None)
+
+        return self._handle_issue(issue)
+
+    def _claim_target_issue(self, issue_id: int) -> IssueRecord | None:
+        issue = self.db.claim_pending_by_id(
+            issue_id=issue_id,
             worker_id=self.config.worker_id,
             max_attempts=self.config.max_attempts,
             lease_seconds=self.config.lease_seconds,
         )
-        if issue is None:
-            self.log.info("no pending issues available")
-            return CycleResult(processed=False, status=None)
+        if issue is not None:
+            return issue
 
-        return self._handle_issue(issue)
+        full = self.gh.view_issue(issue_id)
+        labels = self._label_names(full)
+        self.db.upsert_polled_issues(
+            [
+                {
+                    "id": int(full["number"]),
+                    "title": str(full.get("title", "")),
+                    "body": full.get("body"),
+                    "url": full.get("url"),
+                    "labels": labels,
+                    "updated_at": full.get("updatedAt"),
+                }
+            ]
+        )
+        return self.db.claim_pending_by_id(
+            issue_id=issue_id,
+            worker_id=self.config.worker_id,
+            max_attempts=self.config.max_attempts,
+            lease_seconds=self.config.lease_seconds,
+        )
 
     def _handle_issue(self, issue: IssueRecord) -> CycleResult:
         self.log.info("claimed issue id=%s attempt=%s", issue.id, issue.attempt_count)

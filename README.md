@@ -34,10 +34,17 @@ If you need to target a different local checkout, pass `--repo-root`:
 scryer run-once --repo-root /path/to/local/checkout
 ```
 
+If you need to run a specific issue number directly, pass `--issue`:
+
+```bash
+scryer run-once --issue 123
+```
+
 ## Commands
 
 - `scryer status`: print SQLite status counts.
 - `scryer run-once`: poll, claim one issue, run Codex, create/update PR state.
+  Use `--issue <number>` to target one specific issue.
 - `scryer daemon`: repeat the same loop with lease-aware recovery.
 - `scryer doctor`: verify local environment readiness (`git`, `gh`, repo access, `codex`, paths).
 - `scryer clean`: reset local runtime state (managed worktrees, run logs, and SQLite DB).

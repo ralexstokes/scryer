@@ -211,24 +211,76 @@ class Database:
                 if row is None:
                     return None
 
-                updated = cur.execute(
-                    """
-                    UPDATE issues
-                    SET status = 'running',
-                        started_at = ?,
-                        lease_until = ?,
-                        claimed_by = ?,
-                        attempt_count = attempt_count + 1
-                    WHERE id = ?
-                      AND status = 'pending'
-                    """,
-                    (started_at, lease_until, worker_id, int(row["id"])),
+                claimed = self._claim_issue(
+                    cur=cur,
+                    issue_id=int(row["id"]),
+                    started_at=started_at,
+                    lease_until=lease_until,
+                    worker_id=worker_id,
                 )
-                if updated.rowcount == 1:
-                    claimed = cur.execute("SELECT * FROM issues WHERE id = ?", (int(row["id"]),)).fetchone()
-                    if claimed is None:
-                        return None
-                    return _row_to_issue(claimed)
+                if claimed is not None:
+                    return claimed
+
+    def claim_pending_by_id(
+        self,
+        issue_id: int,
+        worker_id: str,
+        max_attempts: int,
+        lease_seconds: int,
+    ) -> IssueRecord | None:
+        lease_until = (
+            datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)
+        ).isoformat(timespec="seconds").replace("+00:00", "Z")
+        started_at = utcnow_iso()
+        with self._begin_immediate() as cur:
+            row = cur.execute(
+                """
+                SELECT *
+                FROM issues
+                WHERE id = ?
+                  AND status = 'pending'
+                  AND attempt_count < ?
+                """,
+                (issue_id, max_attempts),
+            ).fetchone()
+            if row is None:
+                return None
+            return self._claim_issue(
+                cur=cur,
+                issue_id=int(row["id"]),
+                started_at=started_at,
+                lease_until=lease_until,
+                worker_id=worker_id,
+            )
+
+    def _claim_issue(
+        self,
+        *,
+        cur: sqlite3.Cursor,
+        issue_id: int,
+        started_at: str,
+        lease_until: str,
+        worker_id: str,
+    ) -> IssueRecord | None:
+        updated = cur.execute(
+            """
+            UPDATE issues
+            SET status = 'running',
+                started_at = ?,
+                lease_until = ?,
+                claimed_by = ?,
+                attempt_count = attempt_count + 1
+            WHERE id = ?
+              AND status = 'pending'
+            """,
+            (started_at, lease_until, worker_id, issue_id),
+        )
+        if updated.rowcount != 1:
+            return None
+        claimed = cur.execute("SELECT * FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        if claimed is None:
+            return None
+        return _row_to_issue(claimed)
 
     def mark_done(
         self,
