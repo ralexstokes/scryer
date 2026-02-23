@@ -24,6 +24,17 @@ def _coalesce_env(name: str) -> str | None:
     return None
 
 
+def default_config_path() -> Path:
+    xdg_config_home = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config_home:
+        base = Path(xdg_config_home).expanduser()
+    else:
+        base = Path.home() / ".config"
+    if not base.is_absolute():
+        base = (Path.cwd() / base).resolve()
+    return (base / "scryer" / "config.toml").resolve()
+
+
 @dataclass(slots=True)
 class Config:
     repo: str
@@ -63,17 +74,18 @@ class Config:
 def load_config(config_path: str | Path | None = None) -> Config:
     raw: dict[str, object] = {}
     resolved_config_path: Path | None = None
+    default_path = default_config_path()
     if config_path:
-        candidate = Path(config_path)
+        candidate = Path(config_path).expanduser()
         if candidate.exists():
             resolved_config_path = candidate.resolve()
             with candidate.open("rb") as handle:
                 raw = tomllib.load(handle)
-        elif str(config_path) != "config.toml":
+        elif candidate.resolve() != default_path:
             raise FileNotFoundError(f"Config file not found: {config_path}")
-    elif Path("config.toml").exists():
-        resolved_config_path = Path("config.toml").resolve()
-        with Path("config.toml").open("rb") as handle:
+    elif default_path.exists():
+        resolved_config_path = default_path
+        with default_path.open("rb") as handle:
             raw = tomllib.load(handle)
 
     config_dir = resolved_config_path.parent if resolved_config_path else Path.cwd()
@@ -173,4 +185,3 @@ def load_config(config_path: str | Path | None = None) -> Config:
     )
     cfg.ensure_directories()
     return cfg
-

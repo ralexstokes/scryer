@@ -6,32 +6,32 @@ worktree, and opens draft pull requests for human review.
 
 ## Quick Start
 
-1. Create `config.toml` (see `config.example.toml`).
+1. Create `~/.config/scryer/config.toml` (see `config.example.toml`), or pass an explicit `--config` path.
 2. Ensure `gh` auth is configured for the target repo.
 3. Ensure `codex` CLI is installed and accessible in `PATH`.
 4. Run one cycle:
 
 ```bash
-scryer run-once --config config.toml
+scryer run-once
 ```
 
 5. Run continuously:
 
 ```bash
-scryer daemon --config config.toml
+scryer daemon
 ```
 
 To keep a persistent live log, add `--log-file` and tail it:
 
 ```bash
-scryer daemon --config config.toml --log-file ./.scryer/daemon.log
+scryer daemon --log-file ./.scryer/daemon.log
 tail -f ./.scryer/daemon.log
 ```
 
 If you need to target a different local checkout, pass `--repo-root`:
 
 ```bash
-scryer run-once --config config.toml --repo-root /path/to/local/checkout
+scryer run-once --repo-root /path/to/local/checkout
 ```
 
 ## Commands

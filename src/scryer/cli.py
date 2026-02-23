@@ -7,7 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import load_config
+from .config import default_config_path, load_config
 from .daemon import DaemonService
 from .db import Database
 from .doctor import print_doctor_report, run_doctor
@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scryer GitHub enhancement issue daemon")
 
     def add_common_args(target: argparse.ArgumentParser, *, with_defaults: bool) -> None:
-        config_default = "config.toml" if with_defaults else argparse.SUPPRESS
+        config_default = str(default_config_path()) if with_defaults else argparse.SUPPRESS
         log_default = "INFO" if with_defaults else argparse.SUPPRESS
         log_file_default = None if with_defaults else argparse.SUPPRESS
         repo_root_default = None if with_defaults else argparse.SUPPRESS
