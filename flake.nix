@@ -25,6 +25,7 @@
             packages = with pkgs; [
               python314
               uv
+              gh
             ];
           };
         });
