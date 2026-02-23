@@ -1,0 +1,2 @@
+[console_scripts]
+scryer = scryer.cli:main
