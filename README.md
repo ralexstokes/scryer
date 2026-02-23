@@ -21,6 +21,9 @@ scryer run-once
 scryer daemon
 ```
 
+Set `max_concurrent` in your config to process multiple claimed issues in
+parallel per daemon cycle (default: `1`).
+
 To keep a persistent live log, add `--log-file` and tail it:
 
 ```bash
@@ -43,7 +46,7 @@ scryer run-once --issue 123
 ## Commands
 
 - `scryer status`: print SQLite status counts.
-- `scryer run-once`: poll, claim one issue, run Codex, create/update PR state.
+- `scryer run-once`: poll, claim up to `max_concurrent` issues, run Codex, create/update PR state.
   Use `--issue <number>` to target one specific issue.
 - `scryer daemon`: repeat the same loop with lease-aware recovery.
 - `scryer doctor`: verify local environment readiness (`git`, `gh`, repo access, `codex`, paths).

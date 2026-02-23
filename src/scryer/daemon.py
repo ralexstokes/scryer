@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import signal
 import time
@@ -54,11 +55,12 @@ class DaemonService:
         consecutive_failures = 0
         cycle = 0
         self.log.info(
-            "daemon started worker=%s poll_interval_seconds=%s lease_seconds=%s max_attempts=%s",
+            "daemon started worker=%s poll_interval_seconds=%s lease_seconds=%s max_attempts=%s max_concurrent=%s",
             self.config.worker_id,
             self.config.poll_interval_seconds,
             self.config.lease_seconds,
             self.config.max_attempts,
+            self.config.max_concurrent,
         )
 
         while not self._stop_requested:
@@ -124,26 +126,98 @@ class DaemonService:
         if expired:
             self.log.info("requeued expired leases count=%s", expired)
 
-        if issue_id is None and self._daily_limit_reached():
+        if issue_id is not None:
+            issue = self._claim_target_issue(issue_id)
+            if issue is None:
+                self.log.info("requested issue is not pending id=%s", issue_id)
+                return CycleResult(processed=False, status=None)
+            return self._handle_issue(issue, self.db)
+
+        claim_limit = self._claim_limit_for_cycle()
+        if claim_limit <= 0:
             self.log.warning("daily issue limit reached limit=%s", self.config.max_issues_per_day)
             return CycleResult(processed=False, status=None)
 
-        if issue_id is None:
+        issues = self._claim_pending_batch(claim_limit)
+        if not issues:
+            self.log.info("no pending issues available")
+            return CycleResult(processed=False, status=None)
+        self.log.info(
+            "claimed issues count=%s max_concurrent=%s issue_ids=%s",
+            len(issues),
+            self.config.max_concurrent,
+            ",".join(str(issue.id) for issue in issues),
+        )
+        return self._process_claimed_issues(issues)
+
+    def _claim_limit_for_cycle(self) -> int:
+        daily_remaining = self._daily_remaining_capacity()
+        if daily_remaining <= 0:
+            return 0
+        return min(max(1, self.config.max_concurrent), daily_remaining)
+
+    def _daily_remaining_capacity(self) -> int:
+        today = date.today().isoformat()
+        done_count = self.db.get_daily_done_count(today)
+        return max(self.config.max_issues_per_day - done_count, 0)
+
+    def _claim_pending_batch(self, claim_limit: int) -> list[IssueRecord]:
+        claimed: list[IssueRecord] = []
+        for _ in range(claim_limit):
             issue = self.db.claim_next_pending(
                 worker_id=self.config.worker_id,
                 max_attempts=self.config.max_attempts,
                 lease_seconds=self.config.lease_seconds,
             )
             if issue is None:
-                self.log.info("no pending issues available")
-                return CycleResult(processed=False, status=None)
-        else:
-            issue = self._claim_target_issue(issue_id)
-            if issue is None:
-                self.log.info("requested issue is not pending id=%s", issue_id)
-                return CycleResult(processed=False, status=None)
+                break
+            claimed.append(issue)
+        return claimed
 
-        return self._handle_issue(issue)
+    def _process_claimed_issues(self, issues: list[IssueRecord]) -> CycleResult:
+        if len(issues) == 1:
+            return self._handle_issue(issues[0], self.db)
+
+        results: list[CycleResult] = []
+        with ThreadPoolExecutor(max_workers=len(issues), thread_name_prefix="scryer-worker") as executor:
+            futures = [executor.submit(self._handle_issue_with_worker_db, issue) for issue in issues]
+            for future in as_completed(futures):
+                try:
+                    results.append(future.result())
+                except Exception:
+                    self.log.exception("parallel worker failed unexpectedly")
+                    results.append(CycleResult(processed=True, status="failed"))
+
+        statuses = [result.status for result in results if result.status]
+        return CycleResult(
+            processed=any(result.processed for result in results),
+            status=self._aggregate_status(statuses),
+        )
+
+    def _handle_issue_with_worker_db(self, issue: IssueRecord) -> CycleResult:
+        worker_db = Database(self.config.db_path)
+        try:
+            return self._handle_issue(issue, worker_db)
+        finally:
+            worker_db.close()
+
+    @staticmethod
+    def _aggregate_status(statuses: list[str]) -> str | None:
+        if not statuses:
+            return None
+        if all(status in {"failed", "timeout"} for status in statuses):
+            if "failed" in statuses:
+                return "failed"
+            return "timeout"
+        if "done" in statuses:
+            return "done"
+        if "skipped" in statuses:
+            return "skipped"
+        if "timeout" in statuses:
+            return "timeout"
+        if "failed" in statuses:
+            return "failed"
+        return statuses[0]
 
     def _claim_target_issue(self, issue_id: int) -> IssueRecord | None:
         issue = self.db.claim_pending_by_id(
@@ -176,13 +250,13 @@ class DaemonService:
             lease_seconds=self.config.lease_seconds,
         )
 
-    def _handle_issue(self, issue: IssueRecord) -> CycleResult:
+    def _handle_issue(self, issue: IssueRecord, db: Database) -> CycleResult:
         self.log.info("claimed issue id=%s attempt=%s", issue.id, issue.attempt_count)
         run_dir: str | None = None
         try:
             full = self.gh.view_issue(issue.id)
             label_names = self._label_names(full)
-            self.db.update_issue_details(
+            db.update_issue_details(
                 {
                     "id": int(full["number"]),
                     "title": str(full.get("title", "")),
@@ -195,20 +269,20 @@ class DaemonService:
 
             if str(full.get("state", "")).lower() != "open":
                 reason = "issue is no longer open"
-                self.db.mark_skipped(issue.id, reason, run_dir)
+                db.mark_skipped(issue.id, reason, run_dir)
                 self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
             if self.config.trigger_label not in label_names:
                 reason = f"missing trigger label '{self.config.trigger_label}'"
-                self.db.mark_skipped(issue.id, reason, run_dir)
+                db.mark_skipped(issue.id, reason, run_dir)
                 self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
             skip_hit = sorted({label for label in label_names if label in set(self.config.skip_labels)})
             if skip_hit:
                 reason = f"contains skip label(s): {', '.join(skip_hit)}"
-                self.db.mark_skipped(issue.id, reason, run_dir)
+                db.mark_skipped(issue.id, reason, run_dir)
                 self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
@@ -223,7 +297,7 @@ class DaemonService:
             )
             if result.status == "pushed":
                 pr = self.pr_manager.ensure_pr(full, result)
-                self.db.mark_done(
+                db.mark_done(
                     issue_id=issue.id,
                     pr_number=pr.number,
                     pr_url=pr.url,
@@ -231,36 +305,31 @@ class DaemonService:
                     head_sha=result.head_sha,
                     run_dir=run_dir,
                 )
-                self._increment_daily_count()
+                self._increment_daily_count(db)
                 self.log.info("issue complete id=%s pr=%s", issue.id, pr.url)
                 return CycleResult(processed=True, status="done")
 
             if result.status == "skipped":
-                self.db.mark_skipped(issue.id, result.error or "no changes produced", run_dir)
+                db.mark_skipped(issue.id, result.error or "no changes produced", run_dir)
                 self.log.info("issue skipped id=%s reason=%s", issue.id, result.error)
                 return CycleResult(processed=True, status="skipped")
 
             if result.status == "timeout":
-                self.db.mark_timeout(issue.id, result.error or "runner timeout", run_dir)
+                db.mark_timeout(issue.id, result.error or "runner timeout", run_dir)
                 self.log.warning("issue timed out id=%s", issue.id)
                 return CycleResult(processed=True, status="timeout")
 
-            self.db.mark_failed(issue.id, result.error or "runner failed", run_dir)
+            db.mark_failed(issue.id, result.error or "runner failed", run_dir)
             self.log.error("issue failed id=%s error=%s", issue.id, result.error)
             return CycleResult(processed=True, status="failed")
         except Exception as exc:
-            self.db.mark_failed(issue.id, str(exc), run_dir)
+            db.mark_failed(issue.id, str(exc), run_dir)
             self.log.exception("issue handling exception id=%s", issue.id)
             return CycleResult(processed=True, status="failed")
 
-    def _daily_limit_reached(self) -> bool:
+    def _increment_daily_count(self, db: Database) -> None:
         today = date.today().isoformat()
-        done_count = self.db.get_daily_done_count(today)
-        return done_count >= self.config.max_issues_per_day
-
-    def _increment_daily_count(self) -> None:
-        today = date.today().isoformat()
-        self.db.increment_daily_done_count(today)
+        db.increment_daily_done_count(today)
 
     @staticmethod
     def _label_names(issue: dict[str, object]) -> list[str]:

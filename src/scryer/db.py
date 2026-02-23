@@ -396,7 +396,20 @@ class Database:
 
     def increment_daily_done_count(self, date_yyyy_mm_dd: str) -> int:
         key = f"done_count:{date_yyyy_mm_dd}"
-        current = self.get_daily_done_count(date_yyyy_mm_dd)
-        current += 1
-        self.set_meta(key, str(current))
-        return current
+        with self._begin_immediate() as cur:
+            row = cur.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            current = 0
+            if row is not None:
+                try:
+                    current = int(row["value"])
+                except (ValueError, TypeError):
+                    current = 0
+            current += 1
+            cur.execute(
+                """
+                INSERT INTO meta(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, str(current)),
+            )
+            return current
