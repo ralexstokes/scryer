@@ -7,7 +7,7 @@ name = "scryer"
 version = "0.1.0"
 description = "GitHub enhancement issue daemon driven by Codex CLI"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.14"
 dependencies = []
 
 [project.scripts]
