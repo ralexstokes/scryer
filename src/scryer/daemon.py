@@ -52,21 +52,50 @@ class DaemonService:
         self.install_signal_handlers()
         gh_backoff = self.config.poll_interval_seconds
         consecutive_failures = 0
+        cycle = 0
+        self.log.info(
+            "daemon started worker=%s poll_interval_seconds=%s lease_seconds=%s max_attempts=%s",
+            self.config.worker_id,
+            self.config.poll_interval_seconds,
+            self.config.lease_seconds,
+            self.config.max_attempts,
+        )
 
         while not self._stop_requested:
+            cycle += 1
+            cycle_started = time.monotonic()
+            sleep_seconds = self.config.poll_interval_seconds
             try:
                 result = self.run_once()
                 gh_backoff = self.config.poll_interval_seconds
             except GhError as exc:
                 wait_seconds = min(gh_backoff, 300)
-                self.log.error("github operation failed backoff_seconds=%s error=%s", wait_seconds, exc)
+                self.log.error(
+                    "github operation failed cycle=%s backoff_seconds=%s error=%s",
+                    cycle,
+                    wait_seconds,
+                    exc,
+                )
                 gh_backoff = min(gh_backoff * 2, 300)
-                self._sleep_interruptible(wait_seconds)
+                sleep_seconds = wait_seconds
+                self.log.info("cycle sleep cycle=%s sleep_seconds=%s", cycle, sleep_seconds)
+                self._sleep_interruptible(sleep_seconds)
                 continue
             except Exception:
-                self.log.exception("unexpected daemon loop error")
-                self._sleep_interruptible(self.config.poll_interval_seconds)
+                self.log.exception("unexpected daemon loop error cycle=%s", cycle)
+                sleep_seconds = self.config.poll_interval_seconds
+                self.log.info("cycle sleep cycle=%s sleep_seconds=%s", cycle, sleep_seconds)
+                self._sleep_interruptible(sleep_seconds)
                 continue
+
+            elapsed_seconds = int(time.monotonic() - cycle_started)
+            self.log.info(
+                "cycle complete cycle=%s processed=%s status=%s elapsed_seconds=%s",
+                cycle,
+                result.processed,
+                result.status,
+                elapsed_seconds,
+            )
 
             if result.status in {"failed", "timeout"}:
                 consecutive_failures += 1
@@ -76,16 +105,21 @@ class DaemonService:
             if consecutive_failures >= 3:
                 extra_delay = min(self.config.poll_interval_seconds * 3, 300)
                 self.log.warning(
-                    "consecutive failures threshold reached count=%s wait_seconds=%s",
+                    "consecutive failures threshold reached cycle=%s count=%s wait_seconds=%s",
+                    cycle,
                     consecutive_failures,
                     extra_delay,
                 )
-                self._sleep_interruptible(extra_delay)
+                sleep_seconds = extra_delay
             else:
-                self._sleep_interruptible(self.config.poll_interval_seconds)
+                sleep_seconds = self.config.poll_interval_seconds
+            self.log.info("cycle sleep cycle=%s sleep_seconds=%s", cycle, sleep_seconds)
+            self._sleep_interruptible(sleep_seconds)
+        self.log.info("daemon stopped")
 
     def run_once(self) -> CycleResult:
-        self.poller.poll_and_upsert()
+        polled = self.poller.poll_and_upsert()
+        self.log.info("poll sync complete fetched=%s", polled)
         expired = self.db.requeue_expired_leases()
         if expired:
             self.log.info("requeued expired leases count=%s", expired)
@@ -125,21 +159,31 @@ class DaemonService:
             if str(full.get("state", "")).lower() != "open":
                 reason = "issue is no longer open"
                 self.db.mark_skipped(issue.id, reason, run_dir)
+                self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
             if self.config.trigger_label not in label_names:
                 reason = f"missing trigger label '{self.config.trigger_label}'"
                 self.db.mark_skipped(issue.id, reason, run_dir)
+                self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
             skip_hit = sorted({label for label in label_names if label in set(self.config.skip_labels)})
             if skip_hit:
                 reason = f"contains skip label(s): {', '.join(skip_hit)}"
                 self.db.mark_skipped(issue.id, reason, run_dir)
+                self.log.info("issue skipped id=%s reason=%s", issue.id, reason)
                 return CycleResult(processed=True, status="skipped")
 
             result = self.runner.run(full)
             run_dir = str(result.run_dir)
+            self.log.info(
+                "runner result id=%s status=%s branch=%s run_dir=%s",
+                issue.id,
+                result.status,
+                result.branch,
+                run_dir,
+            )
             if result.status == "pushed":
                 pr = self.pr_manager.ensure_pr(full, result)
                 self.db.mark_done(

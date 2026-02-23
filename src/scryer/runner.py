@@ -4,6 +4,7 @@ import json
 import logging
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,6 +32,8 @@ def _short_title(title: str, max_len: int = 72) -> str:
 
 
 class CodexRunner:
+    _HEARTBEAT_SECONDS = 20
+
     def __init__(self, config: Config, repo_root: Path):
         self.config = config
         self.repo_root = repo_root
@@ -65,30 +68,50 @@ class CodexRunner:
                 ["worktree", "add", "-B", branch, str(worktree_path), self.config.base_branch],
                 cwd=self.repo_root,
             )
+            self.log.info(
+                "prepared worktree issue=%s branch=%s path=%s base=%s",
+                issue_id,
+                branch,
+                worktree_path,
+                self.config.base_branch,
+            )
 
             cmd = self._build_codex_command()
-            self.log.info("running codex issue=%s cmd=%s", issue_id, " ".join(cmd))
-            proc = subprocess.run(
+            self.log.info(
+                "starting codex issue=%s timeout_seconds=%s run_dir=%s cmd=%s",
+                issue_id,
+                self.config.codex_timeout_seconds,
+                run_dir,
+                " ".join(cmd),
+            )
+            proc, elapsed_seconds = self._run_codex_with_heartbeat(
                 cmd,
+                prompt_text=prompt_text,
+                issue_id=issue_id,
+                run_dir=run_dir,
                 cwd=worktree_path,
-                input=prompt_text,
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=self.config.codex_timeout_seconds,
+                timeout_seconds=self.config.codex_timeout_seconds,
             )
             codex_stdout = proc.stdout or ""
             codex_stderr = proc.stderr or ""
             exit_code = proc.returncode
+            self.log.info(
+                "codex finished issue=%s exit_code=%s elapsed_seconds=%s",
+                issue_id,
+                exit_code,
+                elapsed_seconds,
+            )
 
             if proc.returncode != 0:
                 status = "failed"
                 error = f"Codex exited with code {proc.returncode}"
+                self.log.error("codex failed issue=%s exit_code=%s", issue_id, proc.returncode)
             else:
                 dirty = self._git_output(["status", "--porcelain"], cwd=worktree_path).strip()
                 if not dirty:
                     status = "skipped"
                     error = "no changes produced"
+                    self.log.info("no changes after codex issue=%s", issue_id)
                 else:
                     self._git(["add", "-A"], cwd=worktree_path)
                     self._git(
@@ -98,14 +121,21 @@ class CodexRunner:
                     head_sha = self._git_output(["rev-parse", "HEAD"], cwd=worktree_path).strip()
                     self._git(["push", "-u", "origin", branch], cwd=worktree_path)
                     status = "pushed"
+                    self.log.info("pushed branch issue=%s branch=%s head_sha=%s", issue_id, branch, head_sha)
         except subprocess.TimeoutExpired as exc:
             codex_stdout = (exc.stdout or "") if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
             codex_stderr = (exc.stderr or "") if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
             status = "timeout"
             error = f"Codex timed out after {self.config.codex_timeout_seconds}s"
+            self.log.error(
+                "codex timeout issue=%s timeout_seconds=%s",
+                issue_id,
+                self.config.codex_timeout_seconds,
+            )
         except Exception as exc:
             status = "failed"
             error = str(exc)
+            self.log.exception("runner failed issue=%s", issue_id)
         finally:
             stdout_path.write_text(codex_stdout, encoding="utf-8")
             stderr_path.write_text(codex_stderr, encoding="utf-8")
@@ -134,6 +164,13 @@ class CodexRunner:
             keep_worktree = self.config.keep_worktree_on_failure and status in {"failed", "timeout"}
             if not keep_worktree:
                 self._cleanup_worktree(worktree_path)
+            self.log.info(
+                "run complete issue=%s status=%s run_dir=%s summary=%s",
+                issue_id,
+                status,
+                run_dir,
+                summary_path,
+            )
 
         return RunnerResult(
             status=status,
@@ -215,6 +252,62 @@ class CodexRunner:
             sections.append(text)
             sections.append("")
         return sections
+
+    def _run_codex_with_heartbeat(
+        self,
+        cmd: list[str],
+        prompt_text: str,
+        issue_id: int,
+        run_dir: Path,
+        cwd: Path,
+        timeout_seconds: int,
+    ) -> tuple[subprocess.CompletedProcess[str], int]:
+        started = time.monotonic()
+        input_text: str | None = prompt_text
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            while True:
+                elapsed = time.monotonic() - started
+                remaining = timeout_seconds - elapsed
+                if remaining <= 0:
+                    proc.kill()
+                    stdout, stderr = proc.communicate()
+                    raise subprocess.TimeoutExpired(
+                        cmd=cmd,
+                        timeout=timeout_seconds,
+                        output=stdout,
+                        stderr=stderr,
+                    )
+
+                wait_seconds = min(self._HEARTBEAT_SECONDS, max(1.0, remaining))
+                try:
+                    stdout, stderr = proc.communicate(input=input_text, timeout=wait_seconds)
+                    done_elapsed = int(time.monotonic() - started)
+                    completed = subprocess.CompletedProcess(
+                        args=cmd,
+                        returncode=proc.returncode,
+                        stdout=stdout or "",
+                        stderr=stderr or "",
+                    )
+                    return completed, done_elapsed
+                except subprocess.TimeoutExpired:
+                    input_text = None
+                    self.log.info(
+                        "codex still running issue=%s elapsed_seconds=%s run_dir=%s",
+                        issue_id,
+                        int(time.monotonic() - started),
+                        run_dir,
+                    )
+        finally:
+            if proc.stdin and not proc.stdin.closed:
+                proc.stdin.close()
 
     def _write_diff(self, worktree_path: Path, diff_path: Path) -> None:
         if not worktree_path.exists():

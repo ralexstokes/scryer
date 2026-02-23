@@ -16,7 +16,24 @@ from .pr import PRManager
 from .runner import CodexRunner
 
 
-def detect_repo_root() -> Path:
+def detect_repo_root(repo_root: str | None = None) -> Path:
+    if repo_root:
+        candidate = Path(repo_root).expanduser().resolve()
+        if not candidate.exists():
+            raise FileNotFoundError(f"Repo root not found: {candidate}")
+        if not candidate.is_dir():
+            raise NotADirectoryError(f"Repo root is not a directory: {candidate}")
+        proc = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=candidate,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            return Path(proc.stdout.strip()).resolve()
+        return candidate
+
     proc = subprocess.run(
         ["git", "rev-parse", "--show-toplevel"],
         text=True,
@@ -34,12 +51,24 @@ def build_parser() -> argparse.ArgumentParser:
     def add_common_args(target: argparse.ArgumentParser, *, with_defaults: bool) -> None:
         config_default = "config.toml" if with_defaults else argparse.SUPPRESS
         log_default = "INFO" if with_defaults else argparse.SUPPRESS
+        log_file_default = None if with_defaults else argparse.SUPPRESS
+        repo_root_default = None if with_defaults else argparse.SUPPRESS
         target.add_argument("--config", default=config_default, help="Path to config TOML file")
+        target.add_argument(
+            "--repo-root",
+            default=repo_root_default,
+            help="Path to git repository root to operate on (defaults to current repository)",
+        )
         target.add_argument(
             "--log-level",
             default=log_default,
             choices=["DEBUG", "INFO", "WARNING", "ERROR"],
             help="Logging level",
+        )
+        target.add_argument(
+            "--log-file",
+            default=log_file_default,
+            help="Optional path to a log file (logs are still written to stderr)",
         )
 
     add_common_args(parser, with_defaults=True)
@@ -64,12 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_service(config_path: str) -> tuple[Database, DaemonService]:
+def build_service(config_path: str, repo_root: Path) -> tuple[Database, DaemonService]:
     config = load_config(config_path)
     db = Database(config.db_path)
     gh = GhClient(config.repo)
     poller = Poller(config=config, db=db, gh=gh)
-    runner = CodexRunner(config=config, repo_root=detect_repo_root())
+    runner = CodexRunner(config=config, repo_root=repo_root)
     pr_manager = PRManager(config=config, gh=gh)
     daemon = DaemonService(
         config=config,
@@ -82,10 +111,10 @@ def build_service(config_path: str) -> tuple[Database, DaemonService]:
     return db, daemon
 
 
-def cmd_status(config_path: str) -> int:
+def cmd_status(config_path: str, repo_root: Path) -> int:
     db: Database | None = None
     try:
-        db, _ = build_service(config_path)
+        db, _ = build_service(config_path, repo_root)
         counts = db.get_status_counts()
         if not counts:
             print("No issues tracked yet.")
@@ -100,10 +129,10 @@ def cmd_status(config_path: str) -> int:
             db.close()
 
 
-def cmd_run_once(config_path: str) -> int:
+def cmd_run_once(config_path: str, repo_root: Path) -> int:
     db: Database | None = None
     try:
-        db, daemon = build_service(config_path)
+        db, daemon = build_service(config_path, repo_root)
         daemon.run_once()
         return 0
     finally:
@@ -111,10 +140,10 @@ def cmd_run_once(config_path: str) -> int:
             db.close()
 
 
-def cmd_daemon(config_path: str) -> int:
+def cmd_daemon(config_path: str, repo_root: Path) -> int:
     db: Database | None = None
     try:
-        db, daemon = build_service(config_path)
+        db, daemon = build_service(config_path, repo_root)
         daemon.run_forever()
         return 0
     finally:
@@ -122,9 +151,9 @@ def cmd_daemon(config_path: str) -> int:
             db.close()
 
 
-def cmd_doctor(config_path: str) -> int:
+def cmd_doctor(config_path: str, repo_root: Path) -> int:
     config = load_config(config_path)
-    results, ok = run_doctor(config=config, repo_root=detect_repo_root())
+    results, ok = run_doctor(config=config, repo_root=repo_root)
     print_doctor_report(results)
     return 0 if ok else 1
 
@@ -132,21 +161,31 @@ def cmd_doctor(config_path: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    repo_root = detect_repo_root(getattr(args, "repo_root", None))
+    log_file = getattr(args, "log_file", None)
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if log_file:
+        resolved_log_file = Path(log_file).expanduser().resolve()
+        resolved_log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(resolved_log_file, encoding="utf-8"))
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        handlers=handlers,
     )
+    if log_file:
+        logging.getLogger(__name__).info("file logging enabled path=%s", resolved_log_file)
 
     try:
         if args.command == "status":
-            return cmd_status(args.config)
+            return cmd_status(args.config, repo_root)
         if args.command == "run-once":
-            return cmd_run_once(args.config)
+            return cmd_run_once(args.config, repo_root)
         if args.command == "daemon":
-            return cmd_daemon(args.config)
+            return cmd_daemon(args.config, repo_root)
         if args.command == "doctor":
-            return cmd_doctor(args.config)
+            return cmd_doctor(args.config, repo_root)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:

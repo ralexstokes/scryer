@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from .config import Config
 from .gh import GhClient
 from .models import PrInfo, RunnerResult
@@ -9,12 +11,18 @@ class PRManager:
     def __init__(self, config: Config, gh: GhClient):
         self.config = config
         self.gh = gh
+        self.log = logging.getLogger(__name__)
 
     def ensure_pr(self, issue: dict[str, object], result: RunnerResult) -> PrInfo:
         branch = result.branch
         existing = self.gh.list_open_pr_for_branch(branch)
         if existing:
             first = existing[0]
+            self.log.info(
+                "pr already open branch=%s pr=%s",
+                branch,
+                first.get("url"),
+            )
             return PrInfo(
                 number=int(first.get("number")),
                 url=str(first.get("url")),
@@ -23,6 +31,12 @@ class PRManager:
 
         title = f"[Codex] {str(issue.get('title', '')).strip()}"
         body = self._build_pr_body(issue)
+        self.log.info(
+            "creating pr branch=%s base=%s draft=%s",
+            branch,
+            self.config.base_branch,
+            self.config.draft_pr,
+        )
         create_out = self.gh.create_pr(
             branch=branch,
             base_branch=self.config.base_branch,
@@ -44,6 +58,9 @@ class PRManager:
                 int(issue["number"]),
                 f"Opened PR for this issue: {pr_url}",
             )
+            self.log.info("posted issue comment issue=%s pr=%s", issue["number"], pr_url)
+
+        self.log.info("pr ready branch=%s pr_number=%s pr_url=%s", branch, pr_number, pr_url)
 
         return PrInfo(number=pr_number, url=pr_url, created=True)
 
@@ -60,4 +77,3 @@ class PRManager:
                 "- Review the PR diff and run project tests/linters.",
             ]
         )
-
