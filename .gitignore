@@ -1,0 +1,4 @@
+.scryer/
+__pycache__/
+*.pyc
+

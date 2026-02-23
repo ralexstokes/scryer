@@ -1,0 +1,23 @@
+repo = "OWNER/REPO"
+workdir = "./.scryer"
+db_path = "./.scryer/state.db"
+trigger_label = "enhancement"
+base_branch = "main"
+poll_interval_seconds = 60
+codex_timeout_seconds = 900
+max_concurrent = 1
+lease_seconds = 2400
+max_attempts = 2
+branch_prefix = "codex"
+
+codex_cmd = "codex"
+codex_mode = "run"
+codex_args = []
+
+max_issues_per_day = 10
+skip_labels = ["wontfix", "blocked"]
+conventions_files = ["AGENTS.md", "CONTRIBUTING.md", "README.md"]
+draft_pr = true
+issue_comment_on_success = false
+keep_worktree_on_failure = false
+
