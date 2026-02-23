@@ -40,6 +40,7 @@ scryer run-once --config config.toml --repo-root /path/to/local/checkout
 - `scryer run-once`: poll, claim one issue, run Codex, create/update PR state.
 - `scryer daemon`: repeat the same loop with lease-aware recovery.
 - `scryer doctor`: verify local environment readiness (`git`, `gh`, repo access, `codex`, paths).
+- `scryer clean`: reset local runtime state (managed worktrees, run logs, and SQLite DB).
 
 All commands accept `--repo-root` to control which local git repository is used
 for git/worktree operations and local doctor checks.

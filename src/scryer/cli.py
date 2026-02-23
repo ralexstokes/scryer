@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_parser("doctor", help="Run environment and integration readiness checks"),
         with_defaults=False,
     )
+    add_common_args(
+        sub.add_parser(
+            "clean",
+            help="Reset local state (managed worktrees, run logs, and SQLite state)",
+        ),
+        with_defaults=False,
+    )
     return parser
 
 
@@ -158,6 +166,103 @@ def cmd_doctor(config_path: str, repo_root: Path) -> int:
     return 0 if ok else 1
 
 
+def _path_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _list_git_worktrees(repo_root: Path) -> list[Path]:
+    proc = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "git worktree list failed")
+    worktrees: list[Path] = []
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            raw_path = line.split(" ", 1)[1].strip()
+            if raw_path:
+                worktrees.append(Path(raw_path).expanduser().resolve())
+    return worktrees
+
+
+def _git_worktree_remove(repo_root: Path, worktree_path: Path) -> None:
+    proc = subprocess.run(
+        ["git", "worktree", "remove", "--force", str(worktree_path)],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or f"failed to remove worktree: {worktree_path}")
+
+
+def _git_worktree_prune(repo_root: Path) -> None:
+    proc = subprocess.run(
+        ["git", "worktree", "prune"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr.strip() or "git worktree prune failed")
+
+
+def _remove_path(path: Path) -> None:
+    if not path.exists() and not path.is_symlink():
+        return
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+        return
+    path.unlink()
+
+
+def cmd_clean(config_path: str, repo_root: Path) -> int:
+    config = load_config(config_path)
+    managed_worktrees = (config.workdir / "worktrees").resolve()
+    managed_runs = (config.workdir / "runs").resolve()
+    db_path = config.db_path.resolve()
+
+    removed_worktrees = 0
+    for path in _list_git_worktrees(repo_root):
+        if path == repo_root:
+            continue
+        if not _path_within(path, managed_worktrees):
+            continue
+        _git_worktree_remove(repo_root, path)
+        removed_worktrees += 1
+    _git_worktree_prune(repo_root)
+
+    _remove_path(managed_worktrees)
+    managed_worktrees.mkdir(parents=True, exist_ok=True)
+
+    _remove_path(managed_runs)
+    managed_runs.mkdir(parents=True, exist_ok=True)
+
+    if db_path.exists() and db_path.is_dir():
+        raise RuntimeError(f"Refusing to remove directory db_path: {db_path}")
+    _remove_path(db_path)
+
+    db = Database(db_path)
+    db.close()
+
+    print("Reset complete:")
+    print(f"- removed git worktrees: {removed_worktrees}")
+    print(f"- reset worktrees dir: {managed_worktrees}")
+    print(f"- reset runs dir: {managed_runs}")
+    print(f"- reset db: {db_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -186,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_daemon(args.config, repo_root)
         if args.command == "doctor":
             return cmd_doctor(args.config, repo_root)
+        if args.command == "clean":
+            return cmd_clean(args.config, repo_root)
     except KeyboardInterrupt:
         return 130
     except Exception as exc:
