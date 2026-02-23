@@ -1,6 +1,6 @@
 repo = "OWNER/REPO"
-workdir = "./.scryer"
-db_path = "./.scryer/state.db"
+workdir = "~/.config/scryer"
+db_path = "~/.config/scryer/state.db"
 trigger_label = "enhancement"
 base_branch = "main"
 poll_interval_seconds = 60
@@ -8,11 +8,11 @@ codex_timeout_seconds = 900
 max_concurrent = 1
 lease_seconds = 2400
 max_attempts = 2
-branch_prefix = "codex"
+branch_prefix = "scryer"
 
 codex_cmd = "codex"
 codex_mode = "run"
-codex_args = []
+codex_args = ["--model", "gpt-5.3-codex"]
 
 max_issues_per_day = 10
 skip_labels = ["wontfix", "blocked"]
