@@ -7,7 +7,7 @@ worktree, and opens draft pull requests for human review.
 ## Quick Start
 
 1. Create `~/.config/scryer/config.toml` (see `config.example.toml`), or pass an explicit `--config` path.
-2. Ensure `gh` auth is configured for the target repo.
+2. Ensure `gh` auth is configured for the local repository you want to operate on.
 3. Ensure `codex` CLI is installed and accessible in `PATH`.
 4. Run one cycle:
 
@@ -49,6 +49,6 @@ scryer run-once --issue 123
 - `scryer doctor`: verify local environment readiness (`git`, `gh`, repo access, `codex`, paths).
 - `scryer clean`: reset local runtime state (managed worktrees, run logs, and SQLite DB).
 
-All commands accept `--repo-root` to control which local git repository is used
-for git/worktree operations and local doctor checks.
+All commands accept `--repo-root` to control which local git repository is used.
+GitHub operations infer repository context from that checkout.
 All commands also accept `--log-level` and `--log-file` for runtime visibility.

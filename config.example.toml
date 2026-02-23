@@ -1,4 +1,3 @@
-repo = "OWNER/REPO"
 workdir = "~/.config/scryer"
 db_path = "~/.config/scryer/state.db"
 trigger_label = "enhancement"
@@ -20,4 +19,3 @@ conventions_files = ["AGENTS.md", "CONTRIBUTING.md", "README.md"]
 draft_pr = true
 issue_comment_on_success = false
 keep_worktree_on_failure = false
-

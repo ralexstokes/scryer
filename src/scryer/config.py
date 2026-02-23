@@ -37,7 +37,6 @@ def default_config_path() -> Path:
 
 @dataclass(slots=True)
 class Config:
-    repo: str
     workdir: Path
     db_path: Path
     trigger_label: str = "enhancement"
@@ -89,10 +88,6 @@ def load_config(config_path: str | Path | None = None) -> Config:
             raw = tomllib.load(handle)
 
     config_dir = resolved_config_path.parent if resolved_config_path else Path.cwd()
-
-    repo = str(raw.get("repo") or _coalesce_env("REPO") or "").strip()
-    if not repo:
-        raise ValueError("Missing required config: repo")
 
     workdir_raw = str(raw.get("workdir") or _coalesce_env("WORKDIR") or "./.scryer")
     workdir = Path(workdir_raw).expanduser()
@@ -157,7 +152,6 @@ def load_config(config_path: str | Path | None = None) -> Config:
         return _parse_bool(str(val))
 
     cfg = Config(
-        repo=repo,
         workdir=workdir,
         db_path=db_path,
         trigger_label=str_value("trigger_label", "enhancement"),

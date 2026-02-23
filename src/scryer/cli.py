@@ -112,7 +112,7 @@ def build_parser() -> argparse.ArgumentParser:
 def build_service(config_path: str, repo_root: Path) -> tuple[Database, DaemonService]:
     config = load_config(config_path)
     db = Database(config.db_path)
-    gh = GhClient(config.repo)
+    gh = GhClient(repo_root)
     poller = Poller(config=config, db=db, gh=gh)
     runner = CodexRunner(config=config, repo_root=repo_root)
     pr_manager = PRManager(config=config, gh=gh)

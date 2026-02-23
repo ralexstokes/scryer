@@ -4,6 +4,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -22,13 +23,14 @@ class GhError(RuntimeError):
 
 
 class GhClient:
-    def __init__(self, repo: str):
-        self.repo = repo
+    def __init__(self, repo_root: Path):
+        self.repo_root = repo_root
 
     def _run(self, args: list[str]) -> str:
         cmd = ["gh", *args]
         proc = subprocess.run(
             cmd,
+            cwd=self.repo_root,
             text=True,
             capture_output=True,
             check=False,
@@ -60,8 +62,6 @@ class GhClient:
             [
                 "issue",
                 "list",
-                "--repo",
-                self.repo,
                 "--search",
                 query,
                 "--limit",
@@ -80,8 +80,6 @@ class GhClient:
                 "issue",
                 "view",
                 str(issue_id),
-                "--repo",
-                self.repo,
                 "--json",
                 "number,title,body,url,labels,updatedAt,state",
             ]
@@ -95,8 +93,6 @@ class GhClient:
             [
                 "pr",
                 "list",
-                "--repo",
-                self.repo,
                 "--head",
                 branch,
                 "--state",
@@ -120,8 +116,6 @@ class GhClient:
         args = [
             "pr",
             "create",
-            "--repo",
-            self.repo,
             "--head",
             branch,
             "--base",
@@ -142,8 +136,6 @@ class GhClient:
                 "issue",
                 "comment",
                 str(issue_id),
-                "--repo",
-                self.repo,
                 "--body",
                 body,
             ]
@@ -157,4 +149,3 @@ class GhClient:
         if not match:
             return None
         return int(match.group(1))
-

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -108,13 +109,22 @@ def run_doctor(config: Config, repo_root: Path) -> tuple[list[CheckResult], bool
             results.append(CheckResult("gh auth", False, msg))
 
         view = _run(
-            ["gh", "repo", "view", config.repo, "--json", "nameWithOwner,defaultBranchRef"],
+            ["gh", "repo", "view", "--json", "nameWithOwner,defaultBranchRef"],
             cwd=repo_root,
         )
         if view.returncode == 0:
-            results.append(CheckResult("repo access", True, config.repo))
+            repo_name = "inferred repository"
+            try:
+                payload = json.loads(view.stdout) if view.stdout.strip() else {}
+                if isinstance(payload, dict):
+                    resolved = payload.get("nameWithOwner")
+                    if isinstance(resolved, str) and resolved.strip():
+                        repo_name = resolved.strip()
+            except json.JSONDecodeError:
+                pass
+            results.append(CheckResult("repo access", True, repo_name))
         else:
-            msg = view.stderr.strip() or view.stdout.strip() or f"cannot access {config.repo}"
+            msg = view.stderr.strip() or view.stdout.strip() or "cannot access inferred repository"
             results.append(CheckResult("repo access", False, msg))
 
     try:
@@ -140,4 +150,3 @@ def print_doctor_report(results: list[CheckResult]) -> None:
     for item in results:
         status = "PASS" if item.ok else "FAIL"
         print(f"[{status}] {item.name}: {item.message}")
-
