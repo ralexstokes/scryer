@@ -39,6 +39,7 @@ def default_config_path() -> Path:
 class Config:
     workdir: Path
     db_path: Path
+    repo_namespace: str = "default"
     trigger_label: str = "enhancement"
     base_branch: str = "main"
     poll_interval_seconds: int = 60
@@ -68,6 +69,18 @@ class Config:
         (self.workdir / "runs").mkdir(parents=True, exist_ok=True)
         (self.workdir / "worktrees").mkdir(parents=True, exist_ok=True)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def ensure_repo_directories(self) -> None:
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        self.worktrees_dir.mkdir(parents=True, exist_ok=True)
+
+    @property
+    def runs_dir(self) -> Path:
+        return self.workdir / "runs" / self.repo_namespace
+
+    @property
+    def worktrees_dir(self) -> Path:
+        return self.workdir / "worktrees" / self.repo_namespace
 
 
 def load_config(config_path: str | Path | None = None) -> Config:

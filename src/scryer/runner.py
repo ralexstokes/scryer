@@ -42,8 +42,9 @@ class CodexRunner:
     def run(self, issue: dict[str, object]) -> RunnerResult:
         issue_id = int(issue["number"])
         branch = f"{self.config.branch_prefix}/issue-{issue_id}"
-        worktree_path = self.config.workdir / "worktrees" / f"issue-{issue_id}"
-        run_dir = self.config.workdir / "runs" / f"issue-{issue_id}" / f"run-{_utc_now_compact()}"
+        worktree_path = self.config.worktrees_dir / f"issue-{issue_id}"
+        run_dir = self.config.runs_dir / f"issue-{issue_id}" / f"run-{_utc_now_compact()}"
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
 
         prompt_text = self._build_prompt(issue)

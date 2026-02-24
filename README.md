@@ -37,6 +37,12 @@ If you need to target a different local checkout, pass `--repo-root`:
 scryer run-once --repo-root /path/to/local/checkout
 ```
 
+State is namespaced by repository identity (derived from `origin` when
+available, with a local path fallback), so multiple repositories can share the
+same configured `workdir` and `db_path` concurrently without issue collisions.
+Runtime paths are stored under `worktrees/<repo-namespace>/...` and
+`runs/<repo-namespace>/...`.
+
 If you need to run a specific issue number directly, pass `--issue`:
 
 ```bash
@@ -45,12 +51,13 @@ scryer run-once --issue 123
 
 ## Commands
 
-- `scryer status`: print SQLite status counts.
+- `scryer status`: print SQLite status counts for the active repository namespace.
 - `scryer run-once`: poll, claim up to `max_concurrent` issues, run Codex, create/update PR state.
   Use `--issue <number>` to target one specific issue.
 - `scryer daemon`: repeat the same loop with lease-aware recovery.
 - `scryer doctor`: verify local environment readiness (`git`, `gh`, repo access, `codex`, paths).
-- `scryer clean`: reset local runtime state (managed worktrees, run logs, and SQLite DB).
+- `scryer clean`: reset local runtime state for the active repository namespace
+  (managed worktrees, run logs, and namespaced SQLite rows).
 
 All commands accept `--repo-root` to control which local git repository is used.
 GitHub operations infer repository context from that checkout.

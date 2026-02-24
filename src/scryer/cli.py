@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from .config import default_config_path, load_config
+from .config import Config, default_config_path, load_config
 from .daemon import DaemonService
 from .db import Database
 from .doctor import print_doctor_report, run_doctor
@@ -46,6 +49,75 @@ def detect_repo_root(repo_root: str | None = None) -> Path:
     return Path(proc.stdout.strip()).resolve()
 
 
+def derive_repo_namespace(repo_root: Path) -> str:
+    remote_namespace = _namespace_from_origin(repo_root)
+    if remote_namespace:
+        return remote_namespace
+
+    resolved = repo_root.resolve()
+    repo_name = re.sub(r"[^A-Za-z0-9._-]+", "-", resolved.name.lower()).strip("-._")
+    if not repo_name:
+        repo_name = "repo"
+    digest = hashlib.sha1(str(resolved).encode("utf-8")).hexdigest()[:12]
+    return f"{repo_name}-{digest}"
+
+
+def _namespace_from_origin(repo_root: Path) -> str | None:
+    proc = subprocess.run(
+        ["git", "remote", "get-url", "origin"],
+        cwd=repo_root,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    slug = _parse_remote_slug(proc.stdout.strip())
+    if slug is None:
+        return None
+    host, owner, repo = slug
+    host_ns = re.sub(r"[^A-Za-z0-9._-]+", "-", host.lower()).strip("-._") or "host"
+    owner_ns = re.sub(r"[^A-Za-z0-9._-]+", "-", owner.lower()).strip("-._") or "owner"
+    repo_ns = re.sub(r"[^A-Za-z0-9._-]+", "-", repo.lower()).strip("-._") or "repo"
+    return f"{host_ns}-{owner_ns}-{repo_ns}"
+
+
+def _parse_remote_slug(remote_url: str) -> tuple[str, str, str] | None:
+    if not remote_url:
+        return None
+
+    host = ""
+    path = ""
+
+    if "://" in remote_url:
+        parsed = urlsplit(remote_url)
+        host = parsed.hostname or ""
+        path = parsed.path
+    else:
+        match = re.match(r"^(?:[^@]+@)?([^:]+):(.+)$", remote_url)
+        if not match:
+            return None
+        host = match.group(1)
+        path = "/" + match.group(2)
+
+    parts = [part for part in path.split("/") if part]
+    if len(parts) < 2:
+        return None
+    owner = parts[-2]
+    repo = parts[-1]
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not host or not owner or not repo:
+        return None
+    return host, owner, repo
+
+
+def load_scoped_config(config_path: str, repo_root: Path) -> Config:
+    config = load_config(config_path)
+    config.repo_namespace = derive_repo_namespace(repo_root)
+    return config
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Scryer GitHub enhancement issue daemon")
 
@@ -76,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub = parser.add_subparsers(dest="command", required=True)
     add_common_args(
-        sub.add_parser("status", help="Show issue status counts from SQLite"),
+        sub.add_parser("status", help="Show issue status counts for the active repository"),
         with_defaults=False,
     )
     run_once_parser = sub.add_parser("run-once", help="Run one poll/claim/execute cycle")
@@ -102,7 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_args(
         sub.add_parser(
             "clean",
-            help="Reset local state (managed worktrees, run logs, and SQLite state)",
+            help="Reset local state for the active repository namespace",
         ),
         with_defaults=False,
     )
@@ -110,8 +182,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def build_service(config_path: str, repo_root: Path) -> tuple[Database, DaemonService]:
-    config = load_config(config_path)
-    db = Database(config.db_path)
+    config = load_scoped_config(config_path, repo_root)
+    config.ensure_repo_directories()
+    db = Database(config.db_path, repo_namespace=config.repo_namespace)
     gh = GhClient(repo_root)
     poller = Poller(config=config, db=db, gh=gh)
     runner = CodexRunner(config=config, repo_root=repo_root)
@@ -133,9 +206,10 @@ def cmd_status(config_path: str, repo_root: Path) -> int:
         db, _ = build_service(config_path, repo_root)
         counts = db.get_status_counts()
         if not counts:
-            print("No issues tracked yet.")
+            print(f"No issues tracked yet for repo namespace: {db.repo_namespace}")
             return 0
         total = sum(counts.values())
+        print(f"Repo namespace: {db.repo_namespace}")
         print(f"Total tracked issues: {total}")
         for status in sorted(counts):
             print(f"{status}: {counts[status]}")
@@ -168,7 +242,7 @@ def cmd_daemon(config_path: str, repo_root: Path) -> int:
 
 
 def cmd_doctor(config_path: str, repo_root: Path) -> int:
-    config = load_config(config_path)
+    config = load_scoped_config(config_path, repo_root)
     results, ok = run_doctor(config=config, repo_root=repo_root)
     print_doctor_report(results)
     return 0 if ok else 1
@@ -235,9 +309,10 @@ def _remove_path(path: Path) -> None:
 
 
 def cmd_clean(config_path: str, repo_root: Path) -> int:
-    config = load_config(config_path)
-    managed_worktrees = (config.workdir / "worktrees").resolve()
-    managed_runs = (config.workdir / "runs").resolve()
+    config = load_scoped_config(config_path, repo_root)
+    config.ensure_repo_directories()
+    managed_worktrees = config.worktrees_dir.resolve()
+    managed_runs = config.runs_dir.resolve()
     db_path = config.db_path.resolve()
 
     removed_worktrees = 0
@@ -257,17 +332,18 @@ def cmd_clean(config_path: str, repo_root: Path) -> int:
     managed_runs.mkdir(parents=True, exist_ok=True)
 
     if db_path.exists() and db_path.is_dir():
-        raise RuntimeError(f"Refusing to remove directory db_path: {db_path}")
-    _remove_path(db_path)
-
-    db = Database(db_path)
+        raise RuntimeError(f"Refusing to use directory db_path: {db_path}")
+    db = Database(db_path, repo_namespace=config.repo_namespace)
+    cleared_issues, cleared_meta = db.clear_namespace_state()
     db.close()
 
     print("Reset complete:")
+    print(f"- repo namespace: {config.repo_namespace}")
     print(f"- removed git worktrees: {removed_worktrees}")
     print(f"- reset worktrees dir: {managed_worktrees}")
     print(f"- reset runs dir: {managed_runs}")
-    print(f"- reset db: {db_path}")
+    print(f"- cleared db rows: issues={cleared_issues} meta={cleared_meta}")
+    print(f"- db file: {db_path}")
     return 0
 
 

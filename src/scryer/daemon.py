@@ -55,8 +55,9 @@ class DaemonService:
         consecutive_failures = 0
         cycle = 0
         self.log.info(
-            "daemon started worker=%s poll_interval_seconds=%s lease_seconds=%s max_attempts=%s max_concurrent=%s",
+            "daemon started worker=%s repo_namespace=%s poll_interval_seconds=%s lease_seconds=%s max_attempts=%s max_concurrent=%s",
             self.config.worker_id,
+            self.config.repo_namespace,
             self.config.poll_interval_seconds,
             self.config.lease_seconds,
             self.config.max_attempts,
@@ -195,7 +196,7 @@ class DaemonService:
         )
 
     def _handle_issue_with_worker_db(self, issue: IssueRecord) -> CycleResult:
-        worker_db = Database(self.config.db_path)
+        worker_db = Database(self.config.db_path, repo_namespace=self.config.repo_namespace)
         try:
             return self._handle_issue(issue, worker_db)
         finally:

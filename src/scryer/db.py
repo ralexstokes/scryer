@@ -9,6 +9,8 @@ from typing import Iterable
 
 from .models import IssueRecord
 
+_SCHEMA_VERSION = 2
+
 
 def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -46,8 +48,9 @@ def _row_to_issue(row: sqlite3.Row) -> IssueRecord:
 
 
 class Database:
-    def __init__(self, db_path: str | Path):
+    def __init__(self, db_path: str | Path, repo_namespace: str = "default"):
         self.db_path = Path(db_path)
+        self.repo_namespace = repo_namespace
         self._conn = sqlite3.connect(self.db_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA foreign_keys = ON")
@@ -74,14 +77,22 @@ class Database:
         finally:
             cur.close()
 
-    def _migrate(self) -> None:
-        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
-        if version >= 1:
-            return
+    def _issues_table_exists(self) -> bool:
+        row = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'issues'"
+        ).fetchone()
+        return row is not None
+
+    def _issues_has_repo_column(self) -> bool:
+        rows = self._conn.execute("PRAGMA table_info(issues)").fetchall()
+        return any(str(row["name"]) == "repo" for row in rows)
+
+    def _create_schema_v2(self) -> None:
         self._conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS issues (
-              id INTEGER PRIMARY KEY,
+              repo TEXT NOT NULL,
+              id INTEGER NOT NULL,
               title TEXT NOT NULL,
               body TEXT,
               url TEXT,
@@ -103,11 +114,13 @@ class Database:
               created_at TEXT DEFAULT CURRENT_TIMESTAMP,
               updated_at TEXT,
               started_at TEXT,
-              completed_at TEXT
+              completed_at TEXT,
+
+              PRIMARY KEY (repo, id)
             );
 
-            CREATE INDEX IF NOT EXISTS idx_issues_status ON issues(status);
-            CREATE INDEX IF NOT EXISTS idx_issues_lease ON issues(lease_until);
+            CREATE INDEX IF NOT EXISTS idx_issues_repo_status ON issues(repo, status);
+            CREATE INDEX IF NOT EXISTS idx_issues_repo_lease ON issues(repo, lease_until);
 
             CREATE TABLE IF NOT EXISTS meta (
               key TEXT PRIMARY KEY,
@@ -115,8 +128,92 @@ class Database:
             );
             """
         )
-        self._conn.execute("PRAGMA user_version = 1")
+
+    def _migrate_v1_to_v2(self) -> None:
+        self._conn.execute("ALTER TABLE issues RENAME TO issues_legacy_v1")
+        self._create_schema_v2()
+        self._conn.execute(
+            """
+            INSERT INTO issues (
+              repo,
+              id,
+              title,
+              body,
+              url,
+              labels_json,
+              status,
+              attempt_count,
+              lease_until,
+              claimed_by,
+              branch,
+              pr_number,
+              pr_url,
+              head_sha,
+              last_error,
+              last_run_dir,
+              created_at,
+              updated_at,
+              started_at,
+              completed_at
+            )
+            SELECT
+              ?,
+              id,
+              title,
+              body,
+              url,
+              labels_json,
+              status,
+              attempt_count,
+              lease_until,
+              claimed_by,
+              branch,
+              pr_number,
+              pr_url,
+              head_sha,
+              last_error,
+              last_run_dir,
+              created_at,
+              updated_at,
+              started_at,
+              completed_at
+            FROM issues_legacy_v1
+            """,
+            (self.repo_namespace,),
+        )
+        self._conn.execute("DROP TABLE issues_legacy_v1")
+
+    def _migrate_legacy_meta_keys(self) -> None:
+        rows = self._conn.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'done_count:%'"
+        ).fetchall()
+        for row in rows:
+            scoped_key = self._meta_key(str(row["key"]))
+            self._conn.execute(
+                """
+                INSERT INTO meta(key, value) VALUES(?, ?)
+                ON CONFLICT(key) DO NOTHING
+                """,
+                (scoped_key, str(row["value"])),
+            )
+
+    def _migrate(self) -> None:
+        version = int(self._conn.execute("PRAGMA user_version").fetchone()[0])
+        if version >= _SCHEMA_VERSION:
+            return
+
+        issues_exists = self._issues_table_exists()
+        if issues_exists and not self._issues_has_repo_column():
+            self._migrate_v1_to_v2()
+        else:
+            self._create_schema_v2()
+
+        self._migrate_legacy_meta_keys()
+        self._conn.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
         self._conn.commit()
+
+    def _meta_key(self, key: str) -> str:
+        return f"{self.repo_namespace}:{key}"
 
     def upsert_polled_issues(self, issues: Iterable[dict[str, object]]) -> None:
         now = utcnow_iso()
@@ -124,9 +221,19 @@ class Database:
             for issue in issues:
                 self.conn.execute(
                     """
-                    INSERT INTO issues (id, title, body, url, labels_json, status, updated_at, created_at)
-                    VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
+                    INSERT INTO issues (
+                      repo,
+                      id,
+                      title,
+                      body,
+                      url,
+                      labels_json,
+                      status,
+                      updated_at,
+                      created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+                    ON CONFLICT(repo, id) DO UPDATE SET
                       title = excluded.title,
                       body = COALESCE(excluded.body, issues.body),
                       url = excluded.url,
@@ -134,6 +241,7 @@ class Database:
                       updated_at = excluded.updated_at
                     """,
                     (
+                        self.repo_namespace,
                         int(issue["id"]),
                         str(issue["title"]),
                         issue.get("body"),
@@ -154,7 +262,8 @@ class Database:
                     url = ?,
                     labels_json = ?,
                     updated_at = ?
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                 """,
                 (
                     issue.get("title"),
@@ -162,6 +271,7 @@ class Database:
                     issue.get("url"),
                     json.dumps(issue.get("labels", [])),
                     issue.get("updated_at"),
+                    self.repo_namespace,
                     int(issue["id"]),
                 ),
             )
@@ -176,11 +286,12 @@ class Database:
                     lease_until = NULL,
                     claimed_by = NULL,
                     last_error = COALESCE(last_error, 'lease expired')
-                WHERE status = 'running'
+                WHERE repo = ?
+                  AND status = 'running'
                   AND lease_until IS NOT NULL
                   AND lease_until < ?
                 """,
-                (now,),
+                (self.repo_namespace, now),
             )
             return cur.rowcount
 
@@ -201,12 +312,13 @@ class Database:
                     """
                     SELECT *
                     FROM issues
-                    WHERE status = 'pending'
+                    WHERE repo = ?
+                      AND status = 'pending'
                       AND attempt_count < ?
                     ORDER BY COALESCE(updated_at, created_at) DESC, id ASC
                     LIMIT 1
                     """,
-                    (max_attempts,),
+                    (self.repo_namespace, max_attempts),
                 ).fetchone()
                 if row is None:
                     return None
@@ -237,11 +349,12 @@ class Database:
                 """
                 SELECT *
                 FROM issues
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                   AND status = 'pending'
                   AND attempt_count < ?
                 """,
-                (issue_id, max_attempts),
+                (self.repo_namespace, issue_id, max_attempts),
             ).fetchone()
             if row is None:
                 return None
@@ -270,14 +383,18 @@ class Database:
                 lease_until = ?,
                 claimed_by = ?,
                 attempt_count = attempt_count + 1
-            WHERE id = ?
+            WHERE repo = ?
+              AND id = ?
               AND status = 'pending'
             """,
-            (started_at, lease_until, worker_id, issue_id),
+            (started_at, lease_until, worker_id, self.repo_namespace, issue_id),
         )
         if updated.rowcount != 1:
             return None
-        claimed = cur.execute("SELECT * FROM issues WHERE id = ?", (issue_id,)).fetchone()
+        claimed = cur.execute(
+            "SELECT * FROM issues WHERE repo = ? AND id = ?",
+            (self.repo_namespace, issue_id),
+        ).fetchone()
         if claimed is None:
             return None
         return _row_to_issue(claimed)
@@ -306,9 +423,10 @@ class Database:
                     completed_at = ?,
                     last_error = NULL,
                     last_run_dir = ?
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                 """,
-                (pr_number, pr_url, branch, head_sha, completed_at, run_dir, issue_id),
+                (pr_number, pr_url, branch, head_sha, completed_at, run_dir, self.repo_namespace, issue_id),
             )
 
     def mark_failed(self, issue_id: int, error: str, run_dir: str | None) -> None:
@@ -323,9 +441,10 @@ class Database:
                     completed_at = ?,
                     last_error = ?,
                     last_run_dir = ?
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                 """,
-                (completed_at, error, run_dir, issue_id),
+                (completed_at, error, run_dir, self.repo_namespace, issue_id),
             )
 
     def mark_timeout(self, issue_id: int, error: str, run_dir: str | None) -> None:
@@ -340,9 +459,10 @@ class Database:
                     completed_at = ?,
                     last_error = ?,
                     last_run_dir = ?
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                 """,
-                (completed_at, error, run_dir, issue_id),
+                (completed_at, error, run_dir, self.repo_namespace, issue_id),
             )
 
     def mark_skipped(self, issue_id: int, reason: str, run_dir: str | None) -> None:
@@ -357,19 +477,42 @@ class Database:
                     completed_at = ?,
                     last_error = ?,
                     last_run_dir = ?
-                WHERE id = ?
+                WHERE repo = ?
+                  AND id = ?
                 """,
-                (completed_at, reason, run_dir, issue_id),
+                (completed_at, reason, run_dir, self.repo_namespace, issue_id),
             )
 
     def get_status_counts(self) -> dict[str, int]:
         rows = self.conn.execute(
-            "SELECT status, COUNT(*) AS count FROM issues GROUP BY status ORDER BY status ASC"
+            """
+            SELECT status, COUNT(*) AS count
+            FROM issues
+            WHERE repo = ?
+            GROUP BY status
+            ORDER BY status ASC
+            """,
+            (self.repo_namespace,),
         ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
+    def clear_namespace_state(self) -> tuple[int, int]:
+        with self.conn:
+            issues_deleted = self.conn.execute(
+                "DELETE FROM issues WHERE repo = ?",
+                (self.repo_namespace,),
+            ).rowcount
+            meta_deleted = self.conn.execute(
+                "DELETE FROM meta WHERE key LIKE ?",
+                (f"{self.repo_namespace}:%",),
+            ).rowcount
+        return issues_deleted, meta_deleted
+
     def get_meta(self, key: str) -> str | None:
-        row = self.conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        row = self.conn.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (self._meta_key(key),),
+        ).fetchone()
         if row is None:
             return None
         return str(row["value"])
@@ -381,7 +524,7 @@ class Database:
                 INSERT INTO meta(key, value) VALUES(?, ?)
                 ON CONFLICT(key) DO UPDATE SET value = excluded.value
                 """,
-                (key, value),
+                (self._meta_key(key), value),
             )
 
     def get_daily_done_count(self, date_yyyy_mm_dd: str) -> int:
@@ -395,7 +538,7 @@ class Database:
             return 0
 
     def increment_daily_done_count(self, date_yyyy_mm_dd: str) -> int:
-        key = f"done_count:{date_yyyy_mm_dd}"
+        key = self._meta_key(f"done_count:{date_yyyy_mm_dd}")
         with self._begin_immediate() as cur:
             row = cur.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
             current = 0
