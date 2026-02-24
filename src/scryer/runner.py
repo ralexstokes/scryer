@@ -230,6 +230,7 @@ class CodexRunner:
             "- If requirements are unclear, stop and explain what is missing instead of guessing.",
             "",
             "## Required Final Output",
+            "- If you are ready for the final output, make a refactor pass on the full change set and include those.",
             "- A brief summary of what changed.",
             "- Exact commands used to verify the change.",
             "",
